@@ -23,7 +23,8 @@ use ReflectionException,
     Doctrine\ORM\ORMException,
     Doctrine\ORM\EntityManager,
     Doctrine\DBAL\Platforms,
-    Doctrine\ORM\Events;
+    Doctrine\ORM\Events,
+    Doctrine\Common\Persistence\Mapping\ClassMetadataFactory as ClassMetadataFactoryInterface;
 
 /**
  * The ClassMetadataFactory is used to create ClassMetadata objects that contain all the
@@ -36,7 +37,7 @@ use ReflectionException,
  * @author  Jonathan Wage <jonwage@gmail.com>
  * @author  Roman Borschel <roman@code-factory.org>
  */
-class ClassMetadataFactory
+class ClassMetadataFactory implements ClassMetadataFactoryInterface
 {
     /**
      * @var EntityManager
@@ -284,10 +285,6 @@ class ClassMetadataFactory
                 throw MappingException::reflectionFailure($className, $e);
             }
 
-            // Verify & complete identifier mapping
-            if ( ! $class->identifier && ! $class->isMappedSuperclass) {
-                throw MappingException::identifierRequired($className);
-            }
             if ($parent && ! $parent->isMappedSuperclass) {
                 if ($parent->isIdGeneratorSequence()) {
                     $class->setSequenceGeneratorDefinition($parent->sequenceGeneratorDefinition);
@@ -315,6 +312,11 @@ class ClassMetadataFactory
                 $this->evm->dispatchEvent(Events::loadClassMetadata, $eventArgs);
             }
 
+            // Verify & complete identifier mapping
+            if ( ! $class->identifier && ! $class->isMappedSuperclass) {
+                throw MappingException::identifierRequired($className);
+            }
+
             // verify inheritance
             if (!$parent && !$class->isMappedSuperclass && !$class->isInheritanceTypeNone()) {
                 if (count($class->discriminatorMap) == 0) {
@@ -323,6 +325,9 @@ class ClassMetadataFactory
                 if (!$class->discriminatorColumn) {
                     throw MappingException::missingDiscriminatorColumn($class->name);
                 }
+            } else if ($class->isMappedSuperclass && $class->name == $class->rootEntityName && (count($class->discriminatorMap) || $class->discriminatorColumn)) {
+                // second condition is necessary for mapped superclasses in the middle of an inheritance hierachy
+                throw MappingException::noInheritanceOnMappedSuperClass($class->name);
             }
 
             $this->loadedMetadata[$className] = $class;
@@ -382,6 +387,9 @@ class ClassMetadataFactory
     {
         foreach ($parentClass->associationMappings as $field => $mapping) {
             if ($parentClass->isMappedSuperclass) {
+                if ($mapping['type'] & ClassMetadata::TO_MANY && !$mapping['isOwningSide']) {
+                    throw MappingException::illegalToManyAssocationOnMappedSuperclass($parentClass->name, $field);
+                }
                 $mapping['sourceEntity'] = $subClass->name;
             }
 

@@ -28,17 +28,11 @@ use Doctrine\ORM\Mapping\ClassMetadata,
  * types in the hierarchy.
  * 
  * @author Roman Borschel <roman@code-factory.org>
+ * @author Benjamin Eberlei <kontakt@beberlei.de>
  * @since 2.0
  */
 abstract class AbstractEntityInheritancePersister extends BasicEntityPersister
 {
-    /**
-     * Map from column names to class names that declare the field the column is mapped to.
-     * 
-     * @var array
-     */
-    private $_declaringClassMap = array();
-
     /**
      * {@inheritdoc}
      */
@@ -62,46 +56,22 @@ abstract class AbstractEntityInheritancePersister extends BasicEntityPersister
     /**
      * {@inheritdoc}
      */
-    protected function _processSQLResult(array $sqlResult)
-    {
-        $data = array();
-        $discrColumnName = $this->_platform->getSQLResultCasing($this->_class->discriminatorColumn['name']);
-        $entityName = $this->_class->discriminatorMap[$sqlResult[$discrColumnName]];
-        unset($sqlResult[$discrColumnName]);
-        foreach ($sqlResult as $column => $value) {
-            $realColumnName = $this->_resultColumnNames[$column];
-            if (isset($this->_declaringClassMap[$column])) {
-                $class = $this->_declaringClassMap[$column];
-                if ($class->name == $entityName || is_subclass_of($entityName, $class->name)) {
-                    $field = $class->fieldNames[$realColumnName];
-                    if (isset($data[$field])) {
-                        $data[$realColumnName] = $value;
-                    } else {
-                        $data[$field] = Type::getType($class->fieldMappings[$field]['type'])
-                                ->convertToPHPValue($value, $this->_platform);
-                    }
-                }
-            } else {
-                $data[$realColumnName] = $value;
-            }
-        }
-
-        return array($entityName, $data);
-    }
-
-    /**
-     * {@inheritdoc}
-     */
-    protected function _getSelectColumnSQL($field, ClassMetadata $class)
+    protected function _getSelectColumnSQL($field, ClassMetadata $class, $alias = 'r')
     {
         $columnName = $class->columnNames[$field];
-        $sql = $this->_getSQLTableAlias($class->name) . '.' . $class->getQuotedColumnName($field, $this->_platform);
+        $sql = $this->_getSQLTableAlias($class->name, $alias == 'r' ? '' : $alias) . '.' . $class->getQuotedColumnName($field, $this->_platform);
         $columnAlias = $this->_platform->getSQLResultCasing($columnName . $this->_sqlAliasCounter++);
-        if ( ! isset($this->_resultColumnNames[$columnAlias])) {
-            $this->_resultColumnNames[$columnAlias] = $columnName;
-            $this->_declaringClassMap[$columnAlias] = $class;
-        }
+        $this->_rsm->addFieldResult($alias, $columnAlias, $field, $class->name);
 
         return "$sql AS $columnAlias";
+    }
+
+    protected function getSelectJoinColumnSQL($tableAlias, $joinColumnName, $className)
+    {
+        $columnAlias = $joinColumnName . $this->_sqlAliasCounter++;
+        $resultColumnName = $this->_platform->getSQLResultCasing($columnAlias);
+        $this->_rsm->addMetaResult('r', $resultColumnName, $joinColumnName);
+        
+        return $tableAlias . ".$joinColumnName AS $columnAlias";
     }
 }

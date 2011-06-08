@@ -91,6 +91,31 @@ class PostgreSqlPlatform extends AbstractPlatform
             return 'POSITION('.$substr.' IN '.$str.')';
         }
     }
+
+    public function getDateDiffExpression($date1, $date2)
+    {
+        return '('.$date1 . '-'.$date2.')';
+    }
+
+    public function getDateAddDaysExpression($date, $days)
+    {
+        return "(" . $date . "+ interval '" . (int)$days . " day')";
+    }
+
+    public function getDateSubDaysExpression($date, $days)
+    {
+        return "(" . $date . "- interval '" . (int)$days . " day')";
+    }
+
+    public function getDateAddMonthExpression($date, $months)
+    {
+        return "(" . $date . "+ interval '" . (int)$months . " month')";
+    }
+
+    public function getDateSubMonthExpression($date, $months)
+    {
+        return "(" . $date . "- interval '" . (int)$months . " month')";
+    }
     
     /**
      * parses a literal boolean value and returns
@@ -135,6 +160,11 @@ class PostgreSqlPlatform extends AbstractPlatform
     {
         return true;
     }
+
+    public function supportsCommentOnStatement()
+    {
+        return true;
+    }
     
     /**
      * Whether the platform prefers sequences for ID generation.
@@ -154,30 +184,17 @@ class PostgreSqlPlatform extends AbstractPlatform
     public function getListSequencesSQL($database)
     {
         return "SELECT
-                    relname
+                    c.relname, n.nspname AS schemaname
                 FROM
-                   pg_class
-                WHERE relkind = 'S' AND relnamespace IN
-                    (SELECT oid FROM pg_namespace
-                        WHERE nspname NOT LIKE 'pg_%' AND nspname != 'information_schema')";
+                   pg_class c, pg_namespace n
+                WHERE relkind = 'S' AND n.oid = c.relnamespace AND 
+                    (n.nspname NOT LIKE 'pg_%' AND n.nspname != 'information_schema')";
     }
 
     public function getListTablesSQL()
     {
-        return "SELECT
-                    c.relname AS table_name
-                FROM pg_class c, pg_user u
-                WHERE c.relowner = u.usesysid
-                    AND c.relkind = 'r'
-                    AND NOT EXISTS (SELECT 1 FROM pg_views WHERE viewname = c.relname)
-                    AND c.relname !~ '^(pg_|sql_)'
-                UNION
-                SELECT c.relname AS table_name
-                FROM pg_class c
-                WHERE c.relkind = 'r'
-                    AND NOT EXISTS (SELECT 1 FROM pg_views WHERE viewname = c.relname)
-                    AND NOT EXISTS (SELECT 1 FROM pg_user WHERE usesysid = c.relowner)
-                    AND c.relname !~ '^pg_'";
+        return "SELECT tablename AS table_name, schemaname AS schema_name
+                FROM pg_tables WHERE schemaname NOT LIKE 'pg_%' AND schemaname != 'information_schema'";
     }
 
     public function getListViewsSQL($database)
@@ -192,9 +209,9 @@ class PostgreSqlPlatform extends AbstractPlatform
                   WHERE r.conrelid =
                   (
                       SELECT c.oid
-                      FROM pg_catalog.pg_class c
-                      LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-                      WHERE c.relname = '" . $table . "' AND pg_catalog.pg_table_is_visible(c.oid)
+                      FROM pg_catalog.pg_class c, pg_catalog.pg_namespace n
+                      WHERE " .$this->getTableWhereClause($table) ."
+                        AND n.oid = c.relnamespace
                   )
                   AND r.contype = 'f'";
     }
@@ -230,19 +247,31 @@ class PostgreSqlPlatform extends AbstractPlatform
      * @param  string $table
      * @return string
      */
-    public function getListTableIndexesSQL($table)
+    public function getListTableIndexesSQL($table, $currentDatabase = null)
     {
         return "SELECT relname, pg_index.indisunique, pg_index.indisprimary,
                        pg_index.indkey, pg_index.indrelid
                  FROM pg_class, pg_index
                  WHERE oid IN (
                     SELECT indexrelid
-                    FROM pg_index, pg_class
-                    WHERE pg_class.relname='$table' AND pg_class.oid=pg_index.indrelid
+                    FROM pg_index si, pg_class sc, pg_namespace sn
+                    WHERE " . $this->getTableWhereClause($table, 'sc', 'sn')." AND sc.oid=si.indrelid AND sc.relnamespace = sn.oid
                  ) AND pg_index.indexrelid = oid";
     }
 
-    public function getListTableColumnsSQL($table)
+    private function getTableWhereClause($table, $classAlias = 'c', $namespaceAlias = 'n')
+    {
+        $whereClause = "";
+        if (strpos($table, ".") !== false) {
+            list($schema, $table) = explode(".", $table);
+            $whereClause = "$classAlias.relname = '" . $table . "' AND $namespaceAlias.nspname = '" . $schema . "'";
+        } else {
+            $whereClause = "$classAlias.relname = '" . $table . "'";
+        }
+        return $whereClause;
+    }
+
+    public function getListTableColumnsSQL($table, $database = null)
     {
         return "SELECT
                     a.attnum,
@@ -263,12 +292,16 @@ class PostgreSqlPlatform extends AbstractPlatform
                      FROM pg_attrdef
                      WHERE c.oid = pg_attrdef.adrelid
                         AND pg_attrdef.adnum=a.attnum
-                    ) AS default
-                    FROM pg_attribute a, pg_class c, pg_type t
-                    WHERE c.relname = '$table'
+                    ) AS default,
+                    (SELECT pg_description.description
+                        FROM pg_description WHERE pg_description.objoid = c.oid AND a.attnum = pg_description.objsubid
+                    ) AS comment
+                    FROM pg_attribute a, pg_class c, pg_type t, pg_namespace n
+                    WHERE ".$this->getTableWhereClause($table, 'c', 'n') ."
                         AND a.attnum > 0
                         AND a.attrelid = c.oid
                         AND a.atttypid = t.oid
+                        AND n.oid = c.relnamespace
                     ORDER BY a.attnum";
     }
     
@@ -340,10 +373,14 @@ class PostgreSqlPlatform extends AbstractPlatform
     public function getAlterTableSQL(TableDiff $diff)
     {
         $sql = array();
+        $commentsSQL = array();
 
         foreach ($diff->addedColumns as $column) {
             $query = 'ADD ' . $this->getColumnDeclarationSQL($column->getQuotedName($this), $column->toArray());
             $sql[] = 'ALTER TABLE ' . $diff->name . ' ' . $query;
+            if ($comment = $this->getColumnComment($column)) {
+                $commentsSQL[] = $this->getCommentOnColumnSQL($diff->name, $column->getName(), $comment);
+            }
         }
 
         foreach ($diff->removedColumns as $column) {
@@ -385,6 +422,9 @@ class PostgreSqlPlatform extends AbstractPlatform
                     $sql[] = "ALTER TABLE " . $diff->name . " " . $query;
                 }
             }
+            if ($columnDiff->hasChanged('comment') && $comment = $this->getColumnComment($column)) {
+                $commentsSQL[] = $this->getCommentOnColumnSQL($diff->name, $column->getName(), $comment);
+            }
         }
 
         foreach ($diff->renamedColumns as $oldColumnName => $column) {
@@ -395,9 +435,7 @@ class PostgreSqlPlatform extends AbstractPlatform
             $sql[] = 'ALTER TABLE ' . $diff->name . ' RENAME TO ' . $diff->newName;
         }
 
-        $sql = array_merge($sql, $this->_getAlterTableIndexForeignKeySQL($diff));
-
-        return $sql;
+        return array_merge($sql, $this->_getAlterTableIndexForeignKeySQL($diff), $commentsSQL);
     }
     
     /**
@@ -591,21 +629,10 @@ class PostgreSqlPlatform extends AbstractPlatform
      * @params array $field
      * @override
      */
-    public function getVarcharTypeDeclarationSQL(array $field)
+    protected function getVarcharTypeDeclarationSQLSnippet($length, $fixed)
     {
-        if ( ! isset($field['length'])) {
-            if (array_key_exists('default', $field)) {
-                $field['length'] = $this->getVarcharDefaultLength();
-            } else {
-                $field['length'] = false;
-            }
-        }
-
-        $length = ($field['length'] <= $this->getVarcharMaxLength()) ? $field['length'] : false;
-        $fixed = (isset($field['fixed'])) ? $field['fixed'] : false;
-
         return $fixed ? ($length ? 'CHAR(' . $length . ')' : 'CHAR(255)')
-                : ($length ? 'VARCHAR(' . $length . ')' : 'TEXT');
+                : ($length ? 'VARCHAR(' . $length . ')' : 'VARCHAR(255)');
     }
     
     /** @override */
@@ -659,7 +686,7 @@ class PostgreSqlPlatform extends AbstractPlatform
      */
     public function getTruncateTableSQL($tableName, $cascade = false)
     {
-        return 'TRUNCATE '.$tableName.' '.($cascade)?'CASCADE':'';
+        return 'TRUNCATE '.$tableName.' '.(($cascade)?'CASCADE':'');
     }
 
     public function getReadLockSQL()
@@ -706,5 +733,15 @@ class PostgreSqlPlatform extends AbstractPlatform
             'numeric'       => 'decimal',
             'year'          => 'date',
         );
+    }
+
+    public function getVarcharMaxLength()
+    {
+        return 65535;
+    }
+    
+    protected function getReservedKeywordsClass()
+    {
+        return 'Doctrine\DBAL\Platforms\Keywords\PostgreSQLKeywords';
     }
 }

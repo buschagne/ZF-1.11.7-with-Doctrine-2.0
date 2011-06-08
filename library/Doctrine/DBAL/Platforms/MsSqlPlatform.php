@@ -311,7 +311,7 @@ class MsSqlPlatform extends AbstractPlatform
     /**
      * @override
      */
-    public function getListTableColumnsSQL($table)
+    public function getListTableColumnsSQL($table, $database = null)
     {
         return 'exec sp_columns @table_name = ' . $table;
     }
@@ -340,7 +340,7 @@ class MsSqlPlatform extends AbstractPlatform
     /**
      * @override
      */
-    public function getListTableIndexesSQL($table)
+    public function getListTableIndexesSQL($table, $currentDatabase = null)
     {
         return "exec sp_helpindex '" . $table . "'";
     }
@@ -516,20 +516,9 @@ class MsSqlPlatform extends AbstractPlatform
     }
 
     /** @override */
-    public function getVarcharTypeDeclarationSQL(array $field)
+    protected function getVarcharTypeDeclarationSQLSnippet($length, $fixed)
     {
-        if (!isset($field['length'])) {
-            if (array_key_exists('default', $field)) {
-                $field['length'] = $this->getVarcharDefaultLength();
-            } else {
-                $field['length'] = false;
-            }
-        }
-
-        $length = ($field['length'] <= $this->getVarcharMaxLength()) ? $field['length'] : false;
-        $fixed = (isset($field['fixed'])) ? $field['fixed'] : false;
-
-        return $fixed ? ($length ? 'NCHAR(' . $length . ')' : 'CHAR(255)') : ($length ? 'NVARCHAR(' . $length . ')' : 'NTEXT');
+        return $fixed ? ($length ? 'NCHAR(' . $length . ')' : 'CHAR(255)') : ($length ? 'NVARCHAR(' . $length . ')' : 'NVARCHAR(255)');
     }
 
     /** @override */
@@ -594,14 +583,14 @@ class MsSqlPlatform extends AbstractPlatform
      * @link http://lists.bestpractical.com/pipermail/rt-devel/2005-June/007339.html
      * @return string
      */
-    public function modifyLimitQuery($query, $limit, $offset = null)
+    protected function doModifyLimitQuery($query, $limit, $offset = null)
     {
         if ($limit > 0) {
             $count = intval($limit);
             $offset = intval($offset);
 
             if ($offset < 0) {
-                throw new Doctrine_Connection_Exception("LIMIT argument offset=$offset is not valid");
+                throw new DBALException("LIMIT argument offset=$offset is not valid");
             }
 
             if ($offset == 0) {
@@ -639,12 +628,12 @@ class MsSqlPlatform extends AbstractPlatform
         if (is_array($item)) {
             foreach ($item as $key => $value) {
                 if (is_bool($value) || is_numeric($item)) {
-                    $item[$key] = ($value) ? 'TRUE' : 'FALSE';
+                    $item[$key] = ($value) ? 1 : 0;
                 }
             }
         } else {
             if (is_bool($item) || is_numeric($item)) {
-                $item = ($item) ? 'TRUE' : 'FALSE';
+                $item = ($item) ? 1 : 0;
             }
         }
         return $item;
@@ -784,5 +773,10 @@ class MsSqlPlatform extends AbstractPlatform
     public function getForUpdateSQL()
     {
         return ' ';
+    }
+    
+    protected function getReservedKeywordsClass()
+    {
+        return 'Doctrine\DBAL\Platforms\Keywords\MsSQLKeywords';
     }
 }

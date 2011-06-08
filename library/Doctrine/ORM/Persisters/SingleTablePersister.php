@@ -26,6 +26,7 @@ use Doctrine\ORM\Mapping\ClassMetadata;
  * SINGLE_TABLE strategy.
  *
  * @author Roman Borschel <roman@code-factory.org>
+ * @author Benjamin Eberlei <kontakt@beberlei.de>
  * @since 2.0
  * @link http://martinfowler.com/eaaCatalog/singleTableInheritance.html
  */
@@ -48,7 +49,8 @@ class SingleTablePersister extends AbstractEntityInheritancePersister
         $rootClass = $this->_em->getClassMetadata($this->_class->rootEntityName);
         $tableAlias = $this->_getSQLTableAlias($rootClass->name);
         $resultColumnName = $this->_platform->getSQLResultCasing($discrColumn);
-        $this->_resultColumnNames[$resultColumnName] = $discrColumn;
+        $this->_rsm->setDiscriminatorColumn('r', $discrColumn);
+        $this->_rsm->addMetaResult('r', $resultColumnName, $discrColumn);
 
         // Append subclass columns
         foreach ($this->_class->subClasses as $subClassName) {
@@ -63,12 +65,10 @@ class SingleTablePersister extends AbstractEntityInheritancePersister
             foreach ($subClass->associationMappings as $assoc) {
                 if ($assoc['isOwningSide'] && $assoc['type'] & ClassMetadata::TO_ONE && ! isset($assoc['inherited'])) {
                     foreach ($assoc['targetToSourceKeyColumns'] as $srcColumn) {
-                        $columnAlias = $srcColumn . $this->_sqlAliasCounter++;
-                        $columnList .= ', ' . $tableAlias . ".$srcColumn AS $columnAlias";
-                        $resultColumnName = $this->_platform->getSQLResultCasing($columnAlias);
-                        if ( ! isset($this->_resultColumnNames[$resultColumnName])) {
-                            $this->_resultColumnNames[$resultColumnName] = $srcColumn;
-                        }
+                        if ($columnList != '') $columnList .= ', ';
+                        $columnList .= $this->getSelectJoinColumnSQL($tableAlias, $srcColumn,
+                            isset($assoc['inherited']) ? $assoc['inherited'] : $this->_class->name
+                        );
                     }
                 }
             }
@@ -88,9 +88,9 @@ class SingleTablePersister extends AbstractEntityInheritancePersister
     }
 
     /** {@inheritdoc} */
-    protected function _getSQLTableAlias($className)
+    protected function _getSQLTableAlias($className, $assocName = '')
     {
-        return parent::_getSQLTableAlias($this->_class->rootEntityName);
+        return parent::_getSQLTableAlias($this->_class->rootEntityName, $assocName);
     }
 
     /** {@inheritdoc} */
